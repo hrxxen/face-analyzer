@@ -1,45 +1,51 @@
-from fastapi import FastAPI, UploadFile, File
-from fastapi.responses import JSONResponse
-import numpy as np
-from PIL import Image
+from fastapi import FastAPI, File, UploadFile
 import onnxruntime as ort
+from PIL import Image
+import numpy as np
 import io
 
 app = FastAPI()
 
-# 모델 세션 전역 변수로 선언
-session = None
-input_name = None
-output_name = None
-
-@app.on_event("startup")
-def load_model():
-    global session, input_name, output_name
-    session = ort.InferenceSession("model.onnx", providers=["CPUExecutionProvider"])
-    input_name = session.get_inputs()[0].name
-    output_name = session.get_outputs()[0].name
+# ✅ 모델 로딩
+try:
+    session = ort.InferenceSession("model.onnx")  # 모델 파일 경로 확인
     print("✅ ONNX 모델 로딩 완료")
+except Exception as e:
+    print("❌ 모델 로딩 실패:", e)
+    session = None  # 이후 예측 방지
 
-@app.get("/")
-def read_root():
-    return {"message": "ONNX 서버가 실행 중입니다."}
-
+# ✅ 예측 라우터
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
-    # 이미지 불러오기
-    image_data = await file.read()
-    image = Image.open(io.BytesIO(image_data)).convert("RGB")
-    
-    # 이미지 전처리 (Teachable Machine 기준 224x224)
-    image = image.resize((224, 224))
-    img_array = np.asarray(image).astype(np.float32) / 255.0
-    img_array = np.expand_dims(img_array, axis=0)  # (1, 224, 224, 3)
+    if session is None:
+        return {"error": "모델 로딩 실패로 예측할 수 없습니다."}
 
-    # ONNX 모델 추론
-    result = session.run([output_name], {input_name: img_array})[0]
-    predicted_class = int(np.argmax(result))
+    try:
+        contents = await file.read()
+        image = Image.open(io.BytesIO(contents)).convert("RGB")
+        image = image.resize((224, 224))  # Teachable Machine에 맞는 크기
+        image_data = np.array(image).astype("float32") / 255.0
+        image_data = np.expand_dims(image_data, axis=0)
 
-    return JSONResponse(content={
-        "prediction": predicted_class,
-        "raw_output": result[0].tolist()
-    })
+        input_name = session.get_inputs()[0].name
+        output = session.run(None, {input_name: image_data})
+        scores = output[0][0]
+        predicted_index = int(np.argmax(scores))
+
+        labels = [
+            "둥근 얼굴", "계란형 얼굴", "각진 얼굴",
+            "하트형 얼굴", "다이아몬드형 얼굴", "삼각형 얼굴", "긴 얼굴"
+        ]
+        prediction_label = labels[predicted_index]
+
+        print("✅ 예측 성공:", prediction_label)
+
+        return {
+            "prediction": predicted_index,
+            "prediction_label": prediction_label,
+            "raw_output": scores.tolist()
+        }
+
+    except Exception as e:
+        print("❌ 예측 중 오류:", e)
+        return {"error": str(e)}
